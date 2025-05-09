@@ -4,6 +4,7 @@ import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 
+
 def load_instance_data(file_path):
     xls = pd.ExcelFile(file_path)
     df_demand = pd.read_excel(xls, "Demand")
@@ -98,10 +99,19 @@ def solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C):
                 model.addConstr(v[i, t - 1] >= D[i, t], name=f"Demand_{i}_{t}")
 
     # Relate order quantity and shipping method (4)
-    M = sum(sum(D[i, t] for t in S_T) for i in S_I)  # Large number M as per problem statement
-    for j in S_J:
+    #M = sum(sum(D[i, t] for t in S_T) for i in S_I)  # Large number M as per problem statement
+    M_i = D.sum(axis=1)  # M_i[i] = sum_t D[i,t]
+    """for j in S_J:
         for t in S_T:
-            model.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t], name=f"ShippingMethod_{j}_{t}")
+            model.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t], name=f"ShippingMethod_{j}_{t}")"""
+    # enforce per‐product link instead of the global sum‐over‐i
+    for i in S_I:
+        for j in S_J:
+            for t in S_T:
+                model.addConstr(
+                    x[i, j, t] <= M_i[i] * y[j, t],
+                    name=f"ShipLink_prod{i}_meth{j}_t{t}"
+                )
 
     # Container constraint (5)
     for t in S_T:
@@ -200,10 +210,18 @@ def solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C):
                 model.addConstr(v[i, t - 1] >= D[i, t])
 
     # Link shipping method usage to order quantities
-    M = sum(D[i, t] for i in S_I for t in S_T)
-    for j in S_J:
+    #M = sum(D[i, t] for i in S_I for t in S_T)
+    M_i = D.sum(axis=1)  # shape (N,), M_i[i] = sum_t D[i,t]
+    """for j in S_J:
         for t in S_T:
-            model.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t])
+            model.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t])"""
+    for i in S_I:
+        for j in S_J:
+            for t in S_T:
+                model.addConstr(
+                    x[i, j, t] <= M_i[i] * y[j, t],
+                    name=f"ShipLink_prod{i}_meth{j}_t{t}"
+                )
 
     # Container usage constraint
     for t in S_T:
@@ -234,7 +252,6 @@ def solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     t_lr = time.time()-t_lr_start
     return model.ObjVal, t_lr
 
-
 def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     t_heur_start = time.time()
     # === STEP 1: LP relaxation ===
@@ -257,7 +274,8 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
         GRB.MINIMIZE
     )
 
-    M = sum(D[i, t] for i in S_I for t in S_T)
+    #M = sum(D[i, t] for i in S_I for t in S_T)
+    M_i = D.sum(axis=1)  # M_i[i] = sum_t D[i,t]
     for i in S_I:
         for t in S_T:
             in_inventory = gp.quicksum(
@@ -270,9 +288,20 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
                 model_lp.addConstr(v[i, t] == v[i, t - 1] + I[i, t] + in_inventory - D[i, t])
                 model_lp.addConstr(v[i, t - 1] >= D[i, t])
 
-    for j in S_J:
+
+
+    """for j in S_J:
         for t in S_T:
-            model_lp.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t])
+            model_lp.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t])"""
+
+    for i in S_I:
+        for j in S_J:
+            for t in S_T:
+                model_lp.addConstr(
+                    x[i, j, t] <= M_i[i] * y[j, t],
+                    name=f"ShipLink_prod{i}_meth{j}_t{t}"
+                )
+
     for t in S_T:
         model_lp.addConstr(gp.quicksum(V[i] * x[i, 2, t] for i in S_I) <= V_C * z[t])
 
@@ -315,15 +344,24 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
                 model_fix.addConstr(v2[i, t] == v2[i, t - 1] + I[i, t] + in_inventory - D[i, t])
                 model_fix.addConstr(v2[i, t - 1] >= D[i, t])
 
-    for j in S_J:
+    """for j in S_J:
         for t in S_T:
-            model_fix.addConstr(gp.quicksum(x2[i, j, t] for i in S_I) <= M * fixed_yz[j, t])
+            model_fix.addConstr(gp.quicksum(x2[i, j, t] for i in S_I) <= M * fixed_yz[j, t])"""
+
+    for i in S_I:
+        for j in S_J:
+            for t in S_T:
+                model_fix.addConstr(
+                    x2[i, j, t] <= M_i[i] * fixed_yz[j, t],
+                    name=f"ShipLink_fix_prod{i}_meth{j}_t{t}"
+                )
+
     for t in S_T:
         model_fix.addConstr(gp.quicksum(V[i] * x2[i, 2, t] for i in S_I) <= V_C * fixed_z[t])
 
     model_fix.optimize()
 
-    if model_fix.status == GRB.OPTIMAL:
+    """if model_fix.status == GRB.OPTIMAL:
         print("\nHeuristic objective:", model_fix.objVal)
 
         # ► Order quantities
@@ -353,7 +391,7 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
             if zval > 0:
                 print(f"z[{t + 1}] = {zval}")
     else:
-        print("No optimal solution found.")
+        print("No optimal solution found.")"""
 
     t_heur = time.time() - t_heur_start
     return model_fix.ObjVal, t_heur
@@ -394,7 +432,6 @@ def solve_naive(N, T, J, D, I, I_0, V, V_C, T_lead, C):
 
     t1 = time.time()
     return total_cost, t1 - t0
-
 
 def run_experiments(folder_path):
     from time import time
@@ -442,7 +479,9 @@ def run_experiments(folder_path):
             "NaiveHeuristic_Time": t_naive,
             "LR_Gap": gap_lr,
             "Heuristic_Gap": gap_heur,
-            "NaiveHeuristic_Gap": gap_naive
+            "NaiveHeuristic_Gap": gap_naive,
+            "real_heur_gap": (obj_heur - obj_lr) / obj_lr,
+            "real_naive_gap": (obj_naive - obj_lr) / obj_lr
         })
 
         # Control print
@@ -457,11 +496,11 @@ def run_experiments(folder_path):
     df.to_excel(output_path, index=False)
     return df
 
-N, T, J, D, I, I_0, V, V_C, T_lead, C = load_instance_data("base_case/scenario_1_instance_1.xlsx")
 
+#N, T, J, D, I, I_0, V, V_C, T_lead, C = load_instance_data("base_case/scenario_1_instance_1.xlsx")
 #print(solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C))
 #print(solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C))
-print(solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C))
+#print(solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C))
 
-#run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446")
+run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446")
 #run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/base_case")

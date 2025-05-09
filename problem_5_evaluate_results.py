@@ -74,34 +74,8 @@ def plot_results_from_excel(result_excel_path):
     plt.show()
 
     # 3. 📦 Optimality Gaps to IP
-    """plt.figure(figsize=(12, 6))
-    df_gap = df.copy()
-    df_gap["Heuristic vs IP"] = 100 * (df_gap["Heuristic_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
-    df_gap["Naive vs IP"] = 100 * (df_gap["NaiveHeuristic_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
-    df_gap["LP vs IP"] = 100 * (df_gap["LR_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
-
-    df_gap_melted = df_gap.melt(
-        id_vars=["ScenarioID"],
-        value_vars=["Heuristic vs IP", "Naive vs IP", "LP vs IP"],
-        var_name="Method", value_name="Gap (%)"
-    )
-
-    sns.boxplot(
-        data=df_gap_melted, x="ScenarioID", y="Gap (%)", hue="Method",
-        palette={key: color_palette[key] for key in df_gap_melted["Method"].unique()}
-    )
-    plt.title("Optimality Gaps to IP per Scenario")
-    plt.ylabel("Gap (%)")
-    plt.xlabel("Scenario ID")
-    plt.legend(title="Method")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "optimality_gaps_to_ip.png"), dpi=300)
-    plt.show()"""
-
-    # 📍 Nur Mittelwerte (Punkte) + Automatisch angepasste Broken Axis
-
     # Gap-Mittelwerte berechnen
-    df_gap = df.copy()
+    """df_gap = df.copy()
     df_gap["Heuristic vs IP"] = 100 * (df_gap["Heuristic_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
     df_gap["Naive vs IP"] = 100 * (df_gap["NaiveHeuristic_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
     df_gap["LP vs IP"] = 100 * (df_gap["LR_ObjVal"] - df_gap["IP_ObjVal"]) / df_gap["IP_ObjVal"]
@@ -175,7 +149,52 @@ def plot_results_from_excel(result_excel_path):
 
     # Speichern
     plt.savefig(os.path.join(output_dir, "optimality_gaps.png"), dpi=300)
+    plt.show()"""
+
+    # 1. Load the summary table from the provided path
+    df = pd.read_excel(result_excel_path)
+
+    # 2. Compute mean real gaps per scenario
+    df_gap = (
+        df.groupby("ScenarioID")[["real_heur_gap", "real_naive_gap"]]
+        .mean()
+        .reset_index()
+        .rename(columns={
+            "real_heur_gap": "Heuristic vs LR (%)",
+            "real_naive_gap": "Naive vs LR (%)"
+        })
+    )
+
+    # 3. Split into two DataFrames
+    heu = df_gap[["ScenarioID", "Heuristic vs LR (%)"]]
+    nai = df_gap[["ScenarioID", "Naive vs LR (%)"]]
+
+    # 4. Compute axis limits and padding
+    min_h, max_h = heu["Heuristic vs LR (%)"].min(), heu["Heuristic vs LR (%)"].max()
+    min_n, max_n = nai["Naive vs LR (%)"].min(), nai["Naive vs LR (%)"].max()
+    pad_h = 0.1 * (max_h - min_h)
+    pad_n = 0.1 * (max_n - min_n)
+
+    # 5. Create split-axis plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
+
+    ax1.scatter(heu["ScenarioID"], heu["Heuristic vs LR (%)"], color="gold", s=80)
+    ax1.set_ylim(min_h - pad_h, max_h + pad_h)
+    ax1.set_title("Heuristic vs LP Gap")
+    ax1.set_xlabel("Scenario ID")
+    ax1.set_ylabel("Mean Gap (%)")
+
+    ax2.scatter(nai["ScenarioID"], nai["Naive vs LR (%)"], color="salmon", s=80)
+    ax2.set_ylim(min_n - pad_n, max_n + pad_n)
+    ax2.set_title("Naive vs LP Gap")
+    ax2.set_xlabel("Scenario ID")
+
+    # ASCII dash in the suptitle
+    plt.suptitle("Mean Optimality Gaps to LP-Relaxation per Scenario", y=1.02)
+    plt.tight_layout()
+    plt.savefig("plots/optimality_gaps.png", dpi=300)
     plt.show()
+
 
 # 🔧 Run
 plot_results_from_excel("/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446/instance_results_summary.xlsx")

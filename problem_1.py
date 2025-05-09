@@ -1,140 +1,157 @@
-# -*- coding: utf-8 -*-
-"""
-===============================================================================
-  OR113‑2  ·  Mid‑Term Project – Problem 1 (Lost‑Sales Model)
-  -----------------------------------------------------------------------------
-  • Reads  :  OR113‑2_midtermProject_data.xlsx
-  • Solves :  Mixed‑Integer LP with lost‑sales, lead times & container capacity
-  • Writes :  OptimalPlan.csv   – every non‑zero order line
-              CostBreakdown.csv – cost components & total
-===============================================================================
-"""
-
-# ------------------------------------------------------------------ 0 IMPORTS
 import pandas as pd
-import numpy  as np
 import gurobipy as gp
-from   gurobipy import GRB
+from gurobipy import GRB
 
-# ------------------------------------------------------------------ 1 INPUT
-FILE = "OR113-2_midtermProject_data.xlsx"             # <‑‑ path to data file
+FILE    = 'OR113-2_midtermProject_data.xlsx'
+Tj      = {1:1, 2:2, 3:3}
+CF      = {1:100, 2:80, 3:50}
+CC, VC  = 2750, 30.0
 
-## 1.1 Demand & initial inventory
-demand_raw = pd.read_excel(FILE, sheet_name="Demand")
-months     = list(demand_raw.columns[2:])              # ['Mar', … 'Aug']
-N          = len(demand_raw) - 1                       # #products
-T          = len(months)                               # 6 months
-items, periods = range(N), range(T)
+xl       = pd.ExcelFile(FILE)
 
-I0 = demand_raw["Initial inventory"].iloc[1:].to_numpy()      # (N,)
-D  = demand_raw.iloc[1:, 2:].to_numpy()                       # (N×T)
-
-## 1.2 In‑transit inventory already on the way
-it_raw  = pd.read_excel(FILE, sheet_name="In-transit")
-Itrans  = np.zeros((N, T))
-for t, col in enumerate(it_raw.columns[1:]):                 # “End of …”
-    if t < T:
-        Itrans[:, t] = it_raw[col].iloc[1:]
-
-## 1.3 Cost & shipping parameters
-inv  = pd.read_excel(FILE, sheet_name="Inventory cost")
-ship = pd.read_excel(FILE, sheet_name="Shipping cost")
-
-H      = inv["Holding cost"   ].to_numpy()            # €/unit‑month
-P      = inv["Purchasing cost"].to_numpy()            # €/unit
-Sales  = inv["Sales price"    ].to_numpy()            # €/unit
-CLS    = Sales - P                                    # lost‑sales penalty €/unit
-
-J      = 3                                            # 0=Express,1=Air,2=Sea
-Vcost  = np.zeros((N, J))                             # variable shipping €/unit
-for i in items:
-    Vcost[i, 0] = ship.iloc[i, 1]                     # express
-    Vcost[i, 1] = ship.iloc[i, 2]                     # air
-    # sea variable cost = 0 (container fee covers it)
-
-FixedShip     = np.array([100, 80, 50])               # € per mode/month
-Lead          = np.array([1, 2, 3])                   # lead times [months]
-VolItem       = ship["Cubic meter"].to_numpy()        # m³ per unit
-ContainerFee  = 2750                                  # € per sea container
-ContainerCap  = 30.0                                  # m³ capacity
-
-# ------------------------------------------------------------------ 2 MODEL
-M = D.sum()                                           # big‑M for linking
-m = gp.Model("LostSalesOrdering")
-m.Params.OutputFlag = 1
-m.Params.MIPGap     = 0.0
-
-## 2.1 Decision variables
-x  = m.addVars(N, J, T, lb=0,          name="x")          # order qty
-v  = m.addVars(N,    T, lb=0,          name="v")          # ending inventory
-ls = m.addVars(N,    T, lb=0,          name="ls")         # lost sales
-y  = m.addVars(J,    T, vtype=GRB.BINARY, name="y")       # mode active?
-z  = m.addVars(      T, vtype=GRB.INTEGER, lb=0, name="z")# sea containers
-
-## 2.2 Inventory balance & lost‑sales limit
-for i in items:
-    for t in periods:
-        arrivals = gp.quicksum(                           # units arriving in t
-            x[i, j, t - Lead[j] + 1]
-            for j in range(J) if t - Lead[j] + 1 >= 0
-        )
-        lhs = (I0[i] if t == 0 else v[i, t-1]) + Itrans[i, t] + arrivals
-        m.addConstr(lhs - D[i, t] == v[i, t] - ls[i, t],  f"bal_{i}_{t}")
-        m.addConstr(ls[i, t] <= D[i, t],                  f"capLS_{i}_{t}")
-
-## 2.3 Link: no orders in mode j at month t unless y[j,t] = 1
-for j in range(J):
-    for t in periods:
-        m.addConstr(gp.quicksum(x[i, j, t] for i in items) <= M * y[j, t],
-                    f"link_{j}_{t}")
-
-## 2.4 Container capacity for sea shipments (mode 2)
-for t in periods:
-    m.addConstr(gp.quicksum(VolItem[i]*x[i, 2, t] for i in items)
-                <= ContainerCap * z[t],                     f"capSea_{t}")
-
-## 2.5 Objective – total cost minimisation
-cost = (
-      gp.quicksum(H[i]*v[i,t]                 for i in items for t in periods)
-    + gp.quicksum((P[i]+Vcost[i,j])*x[i,j,t]  for i in items for j in range(J) for t in periods)
-    + gp.quicksum(FixedShip[j]*y[j,t]         for j in range(J) for t in periods)
-    + gp.quicksum(ContainerFee*z[t]           for t in periods)
-    + gp.quicksum(CLS[i]*ls[i,t]              for i in items for t in periods)
+dem_raw  = xl.parse('Demand', header=None)
+months   = list(dem_raw.iloc[1,2:8])  # ['March',…,'August']
+dem_raw.columns = list(dem_raw.iloc[0,:2]) + months
+dem      = (
+    dem_raw.drop(index=[0,1])
+           .dropna(subset=['Product'])
+           .astype({'Product':int,'Initial inventory':float})
+           .reset_index(drop=True)
 )
-m.setObjective(cost, GRB.MINIMIZE)
 
-# ------------------------------------------------------------------ 3 SOLVE
+it_raw   = xl.parse('In-transit', header=None)
+it_cols  = list(it_raw.iloc[1,1:3])
+it_raw.columns=['Product']+it_cols
+it       = (
+    it_raw.drop(index=[0,1])
+          .dropna(subset=['Product'])
+          .astype(int)
+          .reset_index(drop=True)
+)
+
+inv      = xl.parse('Inventory cost').set_index('Product')
+ship     = xl.parse('Shipping cost').set_index('Product')
+
+periods  = range(1,7)
+monthnm  = dict(zip(periods, months))
+items    = dem['Product'].tolist()
+
+D  = {
+    (r.Product, t): float(r[monthnm[t]])
+    for _,r in dem.iterrows() for t in periods
+}
+
+I0      = dem.set_index('Product')['Initial inventory'].to_dict()
+Iin     = {
+    (r.Product,1): float(r['End of March']) for _,r in it.iterrows()
+}
+Iin.update({
+    (r.Product,2): float(r['End of April']) for _,r in it.iterrows()
+})
+
+CP      = inv['Purchasing cost'].to_dict()
+CH      = inv['Holding cost'].to_dict()
+SP      = inv['Sales price'].to_dict()
+CLS     = {p: SP[p]-CP[p] for p in items}
+
+CV, V   = {}, {}
+for p, row in ship.iterrows():
+    CV[(p,1)] = float(row['Express delivery'])
+    CV[(p,2)] = float(row['Air freight'])
+    CV[(p,3)] = 0.0
+    V[p] = float(row['Cubic meter'])
+
+
+m = gp.Model('OrderingPlan_withLostSales')
+m.Params.MIPGap = 0.0
+
+
+x  = m.addVars(items, Tj.keys(), periods, lb=0, name='x')
+y  = m.addVars(Tj.keys(), periods, vtype=GRB.BINARY, name='y')
+v  = m.addVars(items, periods, lb=0, name='v')
+ls = m.addVars(items, periods, lb=0, name='ls')
+z  = m.addVars(periods, vtype=GRB.INTEGER, lb=0, name='z')
+
+
+for i in items:
+    for t in periods:
+        arrivals = gp.quicksum(
+            x[i,j, t-Tj[j]+1]
+            for j in Tj if t-Tj[j]+1>=1
+        )
+        prev_inv = I0[i] if t==1 else v[i,t-1]
+        intrans   = Iin.get((i,t), 0.0)
+
+        m.addConstr(
+            prev_inv + intrans + arrivals
+            - D[(i,t)] == v[i,t] - ls[i,t],
+            name=f"bal_{i}_{t}"
+        )
+
+        m.addConstr(
+            ls[i,t] <= D[(i,t)],
+            name=f"lsBound_{i}_{t}"
+        )
+
+for j in Tj:
+    lt = Tj[j]
+    for t in periods:
+        rem = sum(
+            D[(i,τ)]
+            for i in items
+            for τ in range(t+lt-1, 7)
+            if τ in periods
+        )
+        m.addConstr(
+            gp.quicksum(x[i,j,t] for i in items)
+            <= rem * y[j,t],
+            name=f"bigM_{j}_{t}"
+        )
+
+
+for t in periods:
+    m.addConstr(
+        gp.quicksum(V[i]*x[i,3,t] for i in items)
+        <= VC * z[t],
+        name=f"capSea_{t}"
+    )
+
+
+holding   = gp.quicksum(CH[i]*v[i,t]            for i in items for t in periods)
+purchase  = gp.quicksum(CP[i]*x[i,j,t]          for i in items for j in Tj for t in periods)
+varship   = gp.quicksum(CV[(i,j)]*x[i,j,t]      for i in items for j in Tj for t in periods)
+fixship   = gp.quicksum(CF[j]*y[j,t]            for j in Tj for t in periods)
+contcost  = gp.quicksum(CC*z[t]                 for t in periods)
+lostsales  = gp.quicksum(CLS[i]*ls[i,t]         for i in items for t in periods)
+
+m.setObjective(
+    holding + purchase + varship + fixship + contcost + lostsales,
+    GRB.MINIMIZE
+)
+
+m.Params.OutputFlag = 1
 m.optimize()
 
-# ------------------------------------------------------------------ 4 EXPORT
-if m.status == GRB.OPTIMAL:
+import pandas as pd
 
-    # 4.1 Order plan
-    plan = []
-    mode_name = {0: "Express", 1: "Air", 2: "Sea"}
-    for t in periods:
-        for j in range(J):
-            for i in items:
-                qty = x[i, j, t].X
-                if qty > 1e-6:                               # filter zeros
-                    plan.append([months[t], mode_name[j], i+1, round(qty, 2)])
-    pd.DataFrame(plan, columns=["Month", "Mode", "Product", "Quantity"]) \
-        .to_csv("OptimalPlan.csv", index=False)
+x_sol = m.getAttr('X', x)
 
-    # 4.2 Cost breakdown
-    breakdown = [
-        ["Holding",   sum(H[i]*v[i,t].X                 for i in items for t in periods)],
-        ["Purchasing",sum(P[i]*x[i,j,t].X               for i in items for j in range(J) for t in periods)],
-        ["Var ship",  sum(Vcost[i,j]*x[i,j,t].X         for i in items for j in range(J) for t in periods)],
-        ["Fixed ship",sum(FixedShip[j]*y[j,t].X         for j in range(J) for t in periods)],
-        ["Container", sum(ContainerFee*z[t].X           for t in periods)],
-        ["Lost sales",sum(CLS[i]*ls[i,t].X              for i in items for t in periods)],
-        ["TOTAL",     m.ObjVal]
-    ]
-    pd.DataFrame(breakdown, columns=["Cost component", "Amount"]) \
-        .to_csv("CostBreakdown.csv", index=False)
+order_plan = []
+for (i, j, t), val in x_sol.items():
+    if val > 1e-3:
+        order_plan.append({
+            "Period": monthnm[t],
+            "Product": i,
+            "Shipping Method": j,
+            "Quantity": round(val, 2)
+        })
 
-    print("\n✅ OptimalPlan.csv and CostBreakdown.csv written.\n")
+df = pd.DataFrame(order_plan)
 
-else:
-    print("❌ No optimal solution found.")
+month_order = ["March", "April", "May", "June", "July", "August"]
+
+df["Period"] = pd.Categorical(df["Period"], categories=month_order, ordered=True)
+
+df.sort_values(by=["Period", "Product", "Shipping Method"], inplace=True)
+
+print(df)
