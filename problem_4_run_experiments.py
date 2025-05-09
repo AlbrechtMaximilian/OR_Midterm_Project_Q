@@ -1,9 +1,11 @@
 import os
 import time
+from time import perf_counter
 import pandas as pd
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
+import math
 
 def solve_and_evaluate_all_instances(folder_path):
     results = []
@@ -76,6 +78,7 @@ def solve_and_evaluate_all_instances(folder_path):
         M = np.sum(D)
 
         # ===== LP Relaxation =====
+        t_lp = perf_counter()
         model = gp.Model("LP_Relaxation")
         model.setParam('OutputFlag', 0)
 
@@ -110,17 +113,17 @@ def solve_and_evaluate_all_instances(folder_path):
         for t in S_T:
             model.addConstr(gp.quicksum(V[i] * x[i, 2, t] for i in S_I) <= V_C * z[t])
 
-        t_lp = time.time()
         model.optimize()
-        t_lp = time.time() - t_lp
         obj_lp = model.objVal if model.status == GRB.OPTIMAL else None
+        t_lp = perf_counter() - t_lp
 
         # ===== IP Model =====
+        t_ip = perf_counter()
         model_ip = gp.Model("IP_Model")
         model_ip.setParam('OutputFlag', 0)
         model_ip.setParam("TimeLimit", 60)
 
-        x_ip = model_ip.addVars(S_I, S_J, S_T, vtype=GRB.INTEGER, name="x_ip")
+        x_ip = model_ip.addVars(S_I, S_J, S_T, vtype=GRB.CONTINUOUS, name="x_ip")
         v_ip = model_ip.addVars(S_I, S_T, vtype=GRB.CONTINUOUS, name="v_ip")
         y_ip = model_ip.addVars(S_J, S_T, vtype=GRB.BINARY, name="y_ip")
         z_ip = model_ip.addVars(S_T, vtype=GRB.INTEGER, name="z_ip")
@@ -143,6 +146,7 @@ def solve_and_evaluate_all_instances(folder_path):
                     model_ip.addConstr(v_ip[i, t] == in_inventory_ip + I_0[i] + I[i, t] - D[i, t])
                 else:
                     model_ip.addConstr(v_ip[i, t] == v_ip[i, t - 1] + in_inventory_ip + I[i, t] - D[i, t])
+                    model_ip.addConstr(v_ip[i, t - 1] >= D[i, t])
 
         for j in S_J:
             for t in S_T:
@@ -151,14 +155,142 @@ def solve_and_evaluate_all_instances(folder_path):
         for t in S_T:
             model_ip.addConstr(gp.quicksum(V[i] * x_ip[i, 2, t] for i in S_I) <= V_C * z_ip[t])
 
-        t_ip = time.time()
+
         model_ip.optimize()
-        t_ip = time.time() - t_ip
+
         obj_ip = model_ip.objVal if model_ip.status == GRB.OPTIMAL else None
         if obj_ip is None:
             print(f"⚠️  IP not solved optimally for Scenario {scenario_id}, Instance {instance_id}.")
+        t_ip = perf_counter() - t_ip
 
-        # ===== Heuristic (Express-only greedy) =====
+        # ===== Heuristic (LP-based round-and-fix heuristic) =====
+        t1 = perf_counter()  # Start total heuristic timing
+
+        # Step 1: Solve LP relaxation
+        model = gp.Model("Heuristic_LP_Relaxation")
+        model.setParam('OutputFlag', 0)
+
+        x = model.addVars(S_I, S_J, S_T, vtype=GRB.CONTINUOUS, name="x")
+        v = model.addVars(S_I, S_T, vtype=GRB.CONTINUOUS, name="v")
+        y = model.addVars(S_J, S_T, vtype=GRB.CONTINUOUS, name="y")
+        z = model.addVars(S_T, vtype=GRB.CONTINUOUS, name="z")
+
+        model.setObjective(
+            gp.quicksum(C["H"][i] * v[i, t] for i in S_I for t in S_T) +
+            gp.quicksum((C["P"][i] + C["V"][i, j]) * x[i, j, t] for i in S_I for j in S_J for t in S_T) +
+            gp.quicksum(C["F"][j] * y[j, t] for j in S_J for t in S_T) +
+            gp.quicksum(C["C"] * z[t] for t in S_T),
+            GRB.MINIMIZE
+        )
+
+        for i in S_I:
+            for t in S_T:
+                in_inventory = gp.quicksum(
+                    x[i, j, t - int(T_lead[j]) + 1]
+                    for j in S_J if t - int(T_lead[j]) + 1 >= 0
+                )
+                if t == 0:
+                    model.addConstr(v[i, t] == in_inventory + I_0[i] + I[i, t] - D[i, t])
+                else:
+                    model.addConstr(v[i, t] == v[i, t - 1] + in_inventory + I[i, t] - D[i, t])
+
+        for j in S_J:
+            for t in S_T:
+                model.addConstr(gp.quicksum(x[i, j, t] for i in S_I) <= M * y[j, t])
+
+        for t in S_T:
+            model.addConstr(gp.quicksum(V[i] * x[i, 2, t] for i in S_I) <= V_C * z[t])
+
+        model.optimize()
+
+        # Step 2: Round y and z (based on LP solution)
+        y_rounded = {(j, t): 1 if y[j, t].X > 0 else 0 for j in S_J for t in S_T}
+        z_rounded = {t: math.ceil(z[t].X) if z[t].X > 0 else 0 for t in S_T}
+
+        # Step 3: Re-solve with fixed y and z
+        model_fix = gp.Model("Heuristic_Fix")
+        model_fix.setParam("OutputFlag", 0)
+
+        x_f = model_fix.addVars(S_I, S_J, S_T, vtype=GRB.CONTINUOUS, name="x_f")
+        v_f = model_fix.addVars(S_I, S_T, vtype=GRB.CONTINUOUS, name="v_f")
+
+        model_fix.setObjective(
+            gp.quicksum(C["H"][i] * v_f[i, t] for i in S_I for t in S_T) +
+            gp.quicksum((C["P"][i] + C["V"][i, j]) * x_f[i, j, t] for i in S_I for j in S_J for t in S_T) +
+            gp.quicksum(C["F"][j] * y_rounded[j, t] for j in S_J for t in S_T) +
+            gp.quicksum(C["C"] * z_rounded[t] for t in S_T),
+            GRB.MINIMIZE
+        )
+
+        for i in S_I:
+            for t in S_T:
+                in_flow = gp.quicksum(x_f[i, j, t - int(T_lead[j]) + 1]
+                                      for j in S_J if t - int(T_lead[j]) + 1 >= 0)
+                if t == 0:
+                    model_fix.addConstr(v_f[i, t] == I_0[i] + I[i, t] + in_flow - D[i, t])
+                else:
+                    model_fix.addConstr(v_f[i, t] == v_f[i, t - 1] + I[i, t] + in_flow - D[i, t])
+
+        for j in S_J:
+            for t in S_T:
+                model_fix.addConstr(gp.quicksum(x_f[i, j, t] for i in S_I) <= M * y_rounded[j, t])
+
+        for t in S_T:
+            model_fix.addConstr(gp.quicksum(V[i] * x_f[i, 2, t] for i in S_I) <= V_C * z_rounded[t])
+
+        model_fix.optimize()
+        obj_heur = model_fix.objVal if model_fix.status == GRB.OPTIMAL else None
+        t_heur = perf_counter() - t1
+
+        """"# ===== Heuristic (direct MIP with relaxed structure, no rounding) =====
+        t1 = perf_counter()
+
+        model_heur = gp.Model("Heuristic_MIP")
+        model_heur.setParam("OutputFlag", 0)
+        model_heur.setParam("MIPGap", 0.0)
+
+        x_h = model_heur.addVars(S_I, S_J, S_T, vtype=GRB.CONTINUOUS, name="x")
+        v_h = model_heur.addVars(S_I, S_T, vtype=GRB.CONTINUOUS, name="v")
+        y_h = model_heur.addVars(S_J, S_T, vtype=GRB.BINARY, name="y")
+        z_h = model_heur.addVars(S_T, vtype=GRB.INTEGER, name="z")
+
+        model_heur.setObjective(
+            gp.quicksum(C["H"][i]*v_h[i,t] for i in S_I for t in S_T)
+          + gp.quicksum((C["P"][i]+C["V"][i,j])*x_h[i,j,t] for i in S_I for j in S_J for t in S_T)
+          + gp.quicksum(C["F"][j]*y_h[j,t] for j in S_J for t in S_T)
+          + gp.quicksum(C["C"]*z_h[t] for t in S_T),
+            GRB.MINIMIZE
+        )
+
+        for i in S_I:
+            for t in S_T:
+                arrive = gp.LinExpr()
+                for j in S_J:
+                    tau = t - (int(T_lead[j])-1)
+                    if tau >= 0:
+                        arrive += x_h[i,j,tau]
+                if t == 0:
+                    model_heur.addConstr(v_h[i,0] == I_0[i] + I[i,0] + arrive - D[i,0])
+                else:
+                    model_heur.addConstr(v_h[i,t] == v_h[i,t-1] + I[i,t] + arrive - D[i,t])
+                    model_heur.addConstr(v_h[i,t-1] >= D[i,t])  # No stockout
+
+        for j in S_J:
+            for t in S_T:
+                model_heur.addConstr(
+                    gp.quicksum(x_h[i,j,t] for i in S_I) <= M * y_h[j,t]
+                )
+
+        for t in S_T:
+            model_heur.addConstr(
+                gp.quicksum(V[i]*x_h[i,2,t] for i in S_I) <= V_C * z_h[t]
+            )
+
+        model_heur.optimize()
+        t_heur = perf_counter() - t1
+        obj_heur = model_heur.objVal if model_heur.status == GRB.OPTIMAL else None"""
+
+        """"# ===== Heuristic (Express-only greedy) =====
         t1 = time.time()
         total_cost_heur = 0
         inventory = I_0.copy()
@@ -177,24 +309,39 @@ def solve_and_evaluate_all_instances(folder_path):
                 holding_cost += C["H"][i] * inventory[i]
             total_cost_heur += shipping_cost + purchase_cost + holding_cost
         t_heur = time.time() - t1
-        obj_heur = total_cost_heur
+        obj_heur = total_cost_heur"""
 
         # ===== Naive Heuristic =====
-        t2 = time.time()
+        t2 = perf_counter()
         total_cost_naive = 0
         for t in range(T):
             for i in range(N):
                 qty = D[i, t]
                 total_cost_naive += qty * (C["P"][i] + C["V"][i, 0])
-        t_naive = time.time() - t2
+        t_naive = perf_counter() - t2
         obj_naive = total_cost_naive
 
-        if obj_ip is not None:
+        """t2 = perf_counter()
+        total_cost_naive = 0
+        
+        for t in range(T):
+            for i in range(N):
+                qty = D[i, t]
+                # Produktions- und variable Versandkosten
+                total_cost_naive += qty * (C["P"][i] + C["V"][i, 0])
+                # fixe Express-Kosten pro Auftrag (hier: pro Produkt und Periode)
+                total_cost_naive += CF[0]
+        
+        t_naive = perf_counter() - t2
+        obj_naive = total_cost_naive"""
+
+        if obj_ip is not None and model_ip.status == gp.GRB.OPTIMAL:
             gap_lp = 100 * (obj_lp - obj_ip) / obj_ip
             gap_heur = 100 * (obj_heur - obj_ip) / obj_ip
             gap_naive = 100 * (obj_naive - obj_ip) / obj_ip
         else:
-            # fallback: use LP as proxy if IP not solved
+            # fallback: use LP as proxy if IP not optimal
+            print("error")
             gap_lp = None
             gap_heur = 100 * (obj_heur - obj_lp) / obj_lp
             gap_naive = 100 * (obj_naive - obj_lp) / obj_lp
@@ -202,17 +349,17 @@ def solve_and_evaluate_all_instances(folder_path):
         results.append({
             "ScenarioID": scenario_id,
             "InstanceID": instance_id,
-            "Obj_IP": round(obj_ip, 2) if obj_ip is not None else None,
-            "Obj_LP": round(obj_lp, 2),
-            "Obj_Heuristic": round(obj_heur, 2),
-            "Obj_Naive": round(obj_naive, 2),
-            "Time_IP": round(t_ip, 4),
-            "Time_LP": round(t_lp, 4),
-            "Time_Heuristic": round(t_heur, 4),
-            "Time_Naive": round(t_naive, 4),
-            "Gap_Heuristic": round(gap_heur, 2) if gap_heur is not None else None,
-            "Gap_Naive": round(gap_naive, 2) if gap_naive is not None else None,
-            "Gap_LP": round(gap_lp, 2) if gap_lp is not None else None
+            "Obj_IP": obj_ip,
+            "Obj_LP": obj_lp,
+            "Obj_Heuristic": obj_heur,
+            "Obj_Naive": obj_naive,
+            "Time_IP": t_ip,
+            "Time_LP": t_lp,
+            "Time_Heuristic": t_heur,
+            "Time_Naive": t_naive,
+            "Gap_Heuristic": gap_heur,
+            "Gap_Naive": gap_naive,
+            "Gap_LP": gap_lp
         })
 
         if instance_id == 30:
@@ -220,7 +367,7 @@ def solve_and_evaluate_all_instances(folder_path):
 
     df_results = pd.DataFrame(results)
     df_results.sort_values(by=["ScenarioID", "InstanceID"], inplace=True)  # 🔥 sort properly
-    output_excel = os.path.join(folder_path, "instance_results_summary.xlsx")
+    output_excel = os.path.join(folder_path, "results.xlsx")
     df_results.to_excel(output_excel, index=False)
     print(f"\n🧾 All results saved to: {output_excel}")
     return output_excel

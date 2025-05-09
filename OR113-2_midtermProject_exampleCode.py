@@ -1,12 +1,56 @@
+import os, time, math
 import pandas as pd
+import numpy as np
+import gurobipy as gp
+from gurobipy import GRB
+
+
+file_path = "base_case/scenario_1_instance_1.xlsx"
+xls = pd.ExcelFile(file_path)
+df_demand = pd.read_excel(xls, "Demand")
+df_intransit = pd.read_excel(xls, "In-transit")
+df_shipcost = pd.read_excel(xls, "Shipping cost")
+df_invcost = pd.read_excel(xls, "Inventory cost")
+df_params = pd.read_excel(xls, "Parameters")
+
+N, T, J = df_demand.shape[0], df_demand.shape[1] - 2, 3
+D, I, I_0, V = np.zeros((N, T)), np.zeros((N, T)), np.zeros(N), np.zeros(N)
+C = {"H": np.zeros(N), "P": np.zeros(N), "V": np.zeros((N, J)), "F": np.zeros(J), "C": 0}
+V_C, T_lead = 30, np.zeros(J)
+
+for i in range(N):
+    I_0[i] = df_demand.iloc[i, 1]
+    for t in range(T):
+        D[i, t] = df_demand.iloc[i, t + 2]
+        I[i, t] = df_intransit.iloc[i, t + 1]
+    V[i] = df_shipcost.iloc[i, 4]
+    C["V"][i, 0] = df_shipcost.iloc[i, 1]
+    C["V"][i, 1] = df_shipcost.iloc[i, 2]
+    C["V"][i, 2] = 0
+    C["P"][i] = df_invcost.iloc[i, 2]
+    C["H"][i] = df_invcost.iloc[i, 3]
+
+for _, row in df_params.iterrows():
+    param = row["Parameter"]
+    if param == "ContainerCost":
+        C["C"] = row["Value"]
+    elif param == "ContainerVolume":
+        V_C = row["Value"]
+    elif "FixedCost_Method" in param:
+        C["F"][int(param[-1]) - 1] = row["Value"]
+    elif "LeadTime_Method" in param:
+        T_lead[int(param[-1]) - 1] = int(row["Value"])
+
+"""import pandas as pd
 import numpy as np
 
 ######################## PARAMTERS STARTING HERE ################################
 # Read the Excel file from the 'Demand' sheet
 file_path = "OR113-2_midtermProject_data.xlsx"
+#file_path = "/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446/scenario_1_instance_1.xlsx"
 df_demand = pd.read_excel(file_path, sheet_name="Demand")
 N = df_demand.shape[0] - 1   # -1 because of the first row, +1 for indices' consistency
-T = df_demand.shape[1] - 2  # -2 because of the first two columns, +1 for indices' consistency  
+T = df_demand.shape[1] - 2  # -2 because of the first two columns, +1 for indices' consistency
 print("N:", N, "T:", T)
 
 # Display the dataframe to verify the data
@@ -56,7 +100,7 @@ for i in range(N):
 
 print("C:", C)
 print("V:", V)
-T_lead = np.array([1, 2, 3]) # T_j
+T_lead = np.array([1, 2, 3]) # T_j"""
 
 ######################## PARAMTERS ENDING HERE ##################################
 
@@ -98,6 +142,9 @@ model.setObjective(holding_cost + purchasing_and_shipping_cost + container_cost,
 # Constraints
 # Inventory balance (2)
 J_in_inventory = np.array([1, 2, 3, 3, 3, 3])
+#J_in_inventory = np.array([1, 2, 3, 3, 3, 3,3,3,3,3])
+
+
 
 for i in S_I:
     for t in S_T:
@@ -146,7 +193,7 @@ model.optimize()
 if model.status == GRB.OPTIMAL:
     print("\nOptimal objective value:", model.objVal)
     print("\nOrder quantities (x_ijt):")
-    
+
     for t in S_T:
         for i in S_I:
             for j in S_J:
