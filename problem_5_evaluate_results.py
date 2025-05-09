@@ -174,7 +174,7 @@ def plot_results_from_excel(result_excel_path):
     plt.subplots_adjust(hspace=0.05)
 
     # Speichern
-    plt.savefig(os.path.join(output_dir, "optimality_gap_means_splitaxis_auto.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "optimality_gaps.png"), dpi=300)
     plt.show()
 
 # 🔧 Run

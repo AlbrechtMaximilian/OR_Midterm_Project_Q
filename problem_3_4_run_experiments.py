@@ -49,7 +49,7 @@ def solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     # D: demand, I: in-transit inventory, C: cost parameters, V: volume, T_lead: lead times, V_C: container volume
 
     # Create the Gurobi model
-    model = gp.Model("InventoryManagement")
+    model = gp.Model("IP")
 
     # Set error parameter
     model.setParam('MIPGap', 0.0)
@@ -82,7 +82,6 @@ def solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     # Constraints
     # Inventory balance (2)
     #J_in_inventory = np.array([1, 2, 3, 3, 3, 3])
-    #J_in_inventory = np.array([1, 2, 3, 3, 3, 3, 3, 3, 3, 3,3,3,3,3,3,3,3,3,3,3])
     J_in_inventory = np.array([min(t + 1, 3) for t in range(T)])
 
     for i in S_I:
@@ -159,7 +158,7 @@ def solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C):
 
 def solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     t_lr_start = time.time()
-    model = gp.Model("InventoryManagement_LP")
+    model = gp.Model("LR")
 
     # Relaxed precision
     model.setParam('MIPGap', 0.0)
@@ -239,7 +238,7 @@ def solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C):
 def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     t_heur_start = time.time()
     # === STEP 1: LP relaxation ===
-    model_lp = gp.Model("LP_Relaxation")
+    model_lp = gp.Model("LR_1")
     model_lp.setParam('OutputFlag', 0)
 
     S_I, S_T, S_J = range(N), range(T), range(J)
@@ -290,7 +289,7 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
     }
 
     # === STEP 3: Second LP with fixed y/z ===
-    model_fix = gp.Model("Fix_YZ")
+    model_fix = gp.Model("LR_2")
     model_fix.setParam('OutputFlag', 0)
 
     x2 = model_fix.addVars(S_I, S_J, S_T, vtype=GRB.CONTINUOUS, name="x")
@@ -323,6 +322,38 @@ def solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C):
         model_fix.addConstr(gp.quicksum(V[i] * x2[i, 2, t] for i in S_I) <= V_C * fixed_z[t])
 
     model_fix.optimize()
+
+    if model_fix.status == GRB.OPTIMAL:
+        print("\nHeuristic objective:", model_fix.objVal)
+
+        # ► Order quantities
+        print("\nOrder quantities (x_ijt):")
+        for t in S_T:
+            for i in S_I:
+                for j in S_J:
+                    if x2[i, j, t].X > 0:
+                        print(f"x[{i + 1},{j + 1},{t + 1}] = {x2[i, j, t].X}")
+
+        # ► Ending inventory
+        print("\nEnding inventory (v_it):")
+        for t in S_T:
+            for i in S_I:
+                if v2[i, t].X > 0:
+                    print(f"v[{i + 1},{t + 1}] = {v2[i, t].X}")
+
+        # ► Shipping method usage (rounded y)
+        print("\nShipping method usage (y_jt):")
+        for (j, t), yval in fixed_yz.items():
+            if yval == 1:
+                print(f"y[{j + 1},{t + 1}] = 1")
+
+        # ► Number of containers (rounded z)
+        print("\nNumber of containers (z_t):")
+        for t, zval in fixed_z.items():
+            if zval > 0:
+                print(f"z[{t + 1}] = {zval}")
+    else:
+        print("No optimal solution found.")
 
     t_heur = time.time() - t_heur_start
     return model_fix.ObjVal, t_heur
@@ -426,11 +457,11 @@ def run_experiments(folder_path):
     df.to_excel(output_path, index=False)
     return df
 
-#N, T, J, D, I, I_0, V, V_C, T_lead, C = load_instance_data("base_case/scenario_1_instance_1.xlsx")
+N, T, J, D, I, I_0, V, V_C, T_lead, C = load_instance_data("base_case/scenario_1_instance_1.xlsx")
 
 #print(solve_ip(N, T, J, D, I, I_0, V, V_C, T_lead, C))
 #print(solve_lp_relaxation(N, T, J, D, I, I_0, V, V_C, T_lead, C))
-#print(solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C))
+print(solve_lp_round_fix(N, T, J, D, I, I_0, V, V_C, T_lead, C))
 
-run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446")
+#run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/generated_structured_20250424_160446")
 #run_experiments("/Users/maximilian/PycharmProjects/OR Midterm Project/base_case")
